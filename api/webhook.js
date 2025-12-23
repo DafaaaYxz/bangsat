@@ -17,116 +17,132 @@ module.exports = async (req, res) => {
 
     const isOwner = (id) => id.toString() === config.ownerId;
 
-    // --- GENERATOR MENU UTAMA ---
     const getMainMenu = (userId) => {
         const buttons = [
             [Markup.button.callback('📊 Info Sistem', 'info_user'), Markup.button.callback('👤 Owner', 'view_owner')],
             [Markup.button.callback('🎟️ Upload Token VIP', 'upload_token')]
         ];
         if (isOwner(userId)) {
-            buttons.unshift([Markup.button.callback('➕ Tambah API Key', 'setup_key'), Markup.button.callback('📜 List Keys', 'list_keys')]);
+            buttons.unshift([Markup.button.callback('➕ API Key', 'setup_key'), Markup.button.callback('📜 List Keys', 'list_keys')]);
+            buttons.push([Markup.button.callback('👥 List User VIP', 'list_user')]);
         }
         return Markup.inlineKeyboard(buttons);
     };
 
-    // --- COMMANDS ---
     bot.start((ctx) => {
-        const msg = isOwner(ctx.from.id) ? "Halo Boss XdpzQ! Gunakan /adduser untuk buat VIP." : "Halo! Selamat datang di XdpzQ-AI.";
+        const msg = isOwner(ctx.from.id) ? "Halo Boss! Gunakan /adduser untuk buat VIP." : "Halo! Selamat datang di XdpzQ-AI.";
         ctx.replyWithMarkdown(msg, getMainMenu(ctx.from.id));
     });
 
+    // --- OWNER COMMANDS ---
     bot.command('adduser', async (ctx) => {
         if (!isOwner(ctx.from.id)) return;
         await redis.set(`state:${ctx.from.id}`, 'vip_1');
-        ctx.reply("🛠️ *Mode VIP*\nMasukkan Nama AI yang diinginkan:");
+        ctx.reply("🛠️ *Mode VIP*\n1. Masukkan Nama AI:");
     });
 
-    bot.command('delkey', async (ctx) => {
+    bot.command('deluser', async (ctx) => {
         if (!isOwner(ctx.from.id)) return;
-        const index = parseInt(ctx.payload) - 1;
-        const keys = await redis.smembers('apikeys:pool');
-        if (keys[index]) {
-            await redis.srem('apikeys:pool', keys[index]);
-            ctx.reply(`✅ Key nomor ${index+1} dihapus.`);
-        } else {
-            ctx.reply("Format: /delkey 1");
+        const targetId = ctx.payload.trim();
+        if (!targetId) return ctx.reply("Gunakan: /deluser <id_telegram>");
+        await redis.del(`user_vip:${targetId}`);
+        ctx.reply(`✅ VIP User ${targetId} telah dicabut.`);
+    });
+
+    // --- ACTIONS ---
+    bot.action('list_user', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Ditolak');
+        ctx.answerCbQuery();
+        
+        const userKeys = await redis.keys('user_vip:*');
+        if (userKeys.length === 0) return ctx.reply("Belum ada user VIP.");
+
+        let txt = "👥 *DAFTAR USER VIP*\n\n";
+        for (const key of userKeys) {
+            const userId = key.split(':')[1];
+            const tokenVip = await redis.get(key);
+            const data = await redis.get(`vip_token:${tokenVip}`);
+            const chatCount = await redis.get(`chat_count:${userId}`) || 0;
+            
+            txt += `👤 ID: \`${userId}\`\n🤖 AI: ${data?.aiName}\n👑 Own: ${data?.ownerName}\n📱 WA: ${data?.waNumber}\n💬 Total Chat: ${chatCount}\n🗑 /deluser ${userId}\n\n`;
         }
-    });
-
-    // --- CALLBACK ACTIONS (TOMBOL) ---
-    bot.action('setup_key', async (ctx) => {
-        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
-        await redis.set(`state:${ctx.from.id}`, 'awaiting_key');
-        ctx.answerCbQuery();
-        ctx.reply('Kirimkan API Key OpenRouter baru:');
-    });
-
-    bot.action('list_keys', async (ctx) => {
-        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
-        const keys = await redis.smembers('apikeys:pool');
-        ctx.answerCbQuery();
-        let txt = "📜 *LIST API KEY*\n\n";
-        keys.forEach((k, i) => txt += `${i+1}. \`${k.substring(0,10)}...\`\n`);
-        ctx.replyWithMarkdown(txt + "\nHapus dengan /delkey <nomor>");
-    });
-
-    bot.action('info_user', async (ctx) => {
-        const keys = await redis.smembers('apikeys:pool');
-        const vipToken = await redis.get(`user_vip:${ctx.from.id}`);
-        ctx.answerCbQuery();
-        ctx.replyWithMarkdown(`📊 *INFO SISTEM*\n\n🔑 API Pool: ${keys.length}\n🌟 Status: ${vipToken ? 'VIP Member' : 'Standar'}`);
+        ctx.replyWithMarkdown(txt);
     });
 
     bot.action('view_owner', async (ctx) => {
         let name = config.owner.name;
+        let wa = config.owner.whatsapp;
         const vipToken = await redis.get(`user_vip:${ctx.from.id}`);
         if (vipToken) {
             const data = await redis.get(`vip_token:${vipToken}`);
-            if (data) name = data.ownerName;
+            if (data) { name = data.ownerName; wa = data.waNumber; }
         }
         ctx.answerCbQuery();
-        ctx.replyWithMarkdown(`👤 *OWNER INFO*\n\nNama: ${name}\nWA: ${config.owner.whatsapp}`, 
-        Markup.inlineKeyboard([[Markup.button.url('WhatsApp', config.owner.waLink)]]));
+        ctx.replyWithMarkdown(`👤 *OWNER INFO*\n\nNama: ${name}\nWA: ${wa}`, 
+        Markup.inlineKeyboard([[Markup.button.url('WhatsApp', config.owner.waLink(wa))]]));
+    });
+
+    bot.action('setup_key', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return;
+        await redis.set(`state:${ctx.from.id}`, 'awaiting_key');
+        ctx.reply('Kirimkan API Key OpenRouter baru:');
+    });
+
+    bot.action('list_keys', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return;
+        const keys = await redis.smembers('apikeys:pool');
+        ctx.replyWithMarkdown(`📜 *LIST API KEY*\nTotal: ${keys.length}\n\nHapus dengan /delkey <nomor>`);
     });
 
     bot.action('upload_token', async (ctx) => {
         await redis.set(`state:${ctx.from.id}`, 'waiting_token');
-        ctx.answerCbQuery();
         ctx.reply("🎟️ Silakan kirimkan Token VIP Anda:");
     });
 
-    // --- HANDLER PESAN TEKS ---
+    bot.action('info_user', async (ctx) => {
+        const count = await redis.get(`chat_count:${ctx.from.id}`) || 0;
+        const vip = await redis.get(`user_vip:${ctx.from.id}`);
+        ctx.replyWithMarkdown(`📊 *INFO AKUN*\n\n🆔 ID: \`${ctx.from.id}\` \n🌟 Status: ${vip ? 'VIP' : 'Standar'}\n💬 Total Chat: ${count}`);
+    });
+
+    // --- MESSAGE HANDLER ---
     bot.on('text', async (ctx) => {
         const userId = ctx.from.id;
         const text = ctx.message.text;
         const state = await redis.get(`state:${userId}`);
 
-        // 1. Logic Create VIP (Owner)
+        // Logic Create VIP (Owner)
         if (state === 'vip_1' && isOwner(userId)) {
             await redis.set(`temp_vip:${userId}`, JSON.stringify({ aiName: text }));
             await redis.set(`state:${userId}`, 'vip_2');
-            return ctx.reply("Nama AI Terinput. Sekarang masukkan Nama Owner VIP:");
+            return ctx.reply("2. Masukkan Nama Owner:");
         }
         if (state === 'vip_2' && isOwner(userId)) {
             const temp = await redis.get(`temp_vip:${userId}`);
+            await redis.set(`temp_vip:${userId}`, JSON.stringify({ ...temp, ownerName: text }));
+            await redis.set(`state:${userId}`, 'vip_3');
+            return ctx.reply("3. Masukkan Nomor WhatsApp (contoh: 0857...):");
+        }
+        if (state === 'vip_3' && isOwner(userId)) {
+            const temp = JSON.parse(await redis.get(`temp_vip:${userId}`));
             const tokenVIP = crypto.randomBytes(3).toString('hex').toUpperCase();
-            await redis.set(`vip_token:${tokenVIP}`, { aiName: temp.aiName, ownerName: text });
+            await redis.set(`vip_token:${tokenVIP}`, { ...temp, waNumber: text });
             await redis.del(`state:${userId}`);
-            return ctx.replyWithMarkdown(`✅ *TOKEN VIP: \`${tokenVIP}\`*\nAI: ${temp.aiName}\nOwner: ${text}`);
+            await redis.del(`temp_vip:${userId}`);
+            return ctx.replyWithMarkdown(`✅ *TOKEN VIP: \`${tokenVIP}\`*\nAI: ${temp.aiName}\nOwner: ${temp.ownerName}\nWA: ${text}`);
         }
 
-        // 2. Logic Upload Token (User)
+        // Logic Upload Token
         if (state === 'waiting_token') {
             const data = await redis.get(`vip_token:${text.toUpperCase()}`);
             if (!data) return ctx.reply("❌ Token Salah!");
             await redis.set(`user_vip:${userId}`, text.toUpperCase());
             await redis.del(`state:${userId}`);
-            return ctx.reply(`✅ VIP AKTIF!\nAI: ${data.aiName}\nOwner: ${data.ownerName}`);
+            return ctx.reply(`✅ VIP AKTIF!`);
         }
 
-        // 3. Logic Tambah API Key (Owner)
+        // Logic API Key
         if (state === 'awaiting_key' && isOwner(userId)) {
-            if (!text.startsWith('sk-or-')) return ctx.reply("❌ Salah format!");
             await redis.sadd('apikeys:pool', text.trim());
             await redis.del(`state:${userId}`);
             return ctx.reply("✅ Key ditambahkan!");
@@ -134,9 +150,9 @@ module.exports = async (req, res) => {
 
         if (text.startsWith('/')) return;
 
-        // --- 4. LOGIKA CHAT AI (SEMUA USER) ---
+        // --- CHAT AI ---
         const keys = await redis.smembers('apikeys:pool');
-        if (keys.length === 0) return ctx.reply("⚠️ Bot sedang tidak memiliki API Key.");
+        if (keys.length === 0) return ctx.reply("⚠️ API Key Kosong.");
 
         let aiName = config.botName;
         let ownerName = config.defaultOwnerName;
@@ -147,6 +163,7 @@ module.exports = async (req, res) => {
         }
 
         await ctx.sendChatAction('typing');
+        await redis.incr(`chat_count:${userId}`); // Hitung statistik chat
 
         let success = false;
         let attempt = 0;
@@ -164,7 +181,6 @@ module.exports = async (req, res) => {
                 const aiMsg = response.data.choices[0].message.content;
                 await ctx.reply(aiMsg);
 
-                // Kirim script sebagai file
                 const codeRegex = /```(\w*)\n([\s\S]*?)```/g;
                 let match;
                 while ((match = codeRegex.exec(aiMsg)) !== null) {
@@ -181,7 +197,7 @@ module.exports = async (req, res) => {
                 } else { break; }
             }
         }
-        if (!success) ctx.reply("❌ Gagal merespon.");
+        if (!success) ctx.reply("❌ Gangguan Sistem.");
     });
 
     if (req.method === 'POST') {
