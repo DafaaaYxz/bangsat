@@ -4,6 +4,7 @@
   "main": "api/webhook.js",
   "dependencies": {
     "telegraf": "^4.12.0",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "@upstash/redis": "^1.25.0"
   }
 }
