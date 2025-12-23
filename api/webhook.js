@@ -12,149 +12,182 @@ const redis = new Redis({
 
 module.exports = async (req, res) => {
     const token = process.env.BOT_TOKEN;
-    if (!token) return res.status(200).send('Bot Token missing');
+    if (!token) return res.status(200).send('Token Missing');
     const bot = new Telegraf(token);
 
     const isOwner = (id) => id.toString() === config.ownerId;
 
-    // --- MENU BUTTONS ---
-    const getMenu = (userId) => {
+    // --- GENERATOR MENU UTAMA ---
+    const getMainMenu = (userId) => {
         const buttons = [
-            [Markup.button.callback('📊 Info Sistem', 'info_user')],
-            [Markup.button.callback('👤 Owner', 'view_owner')],
+            [Markup.button.callback('📊 Info Sistem', 'info_user'), Markup.button.callback('👤 Owner', 'view_owner')],
             [Markup.button.callback('🎟️ Upload Token VIP', 'upload_token')]
         ];
         if (isOwner(userId)) {
-            buttons.unshift([Markup.button.callback('➕ Tambah Key', 'setup_key'), Markup.button.callback('📜 List Keys', 'list_keys')]);
+            buttons.unshift([Markup.button.callback('➕ Tambah API Key', 'setup_key'), Markup.button.callback('📜 List Keys', 'list_keys')]);
         }
         return Markup.inlineKeyboard(buttons);
     };
 
+    // --- COMMANDS ---
     bot.start((ctx) => {
-        const msg = isOwner(ctx.from.id) ? "Halo Boss! Gunakan /adduser untuk buat token VIP." : "Halo! Selamat datang di XdpzQ-AI.";
-        ctx.replyWithMarkdown(msg, getMenu(ctx.from.id));
+        const msg = isOwner(ctx.from.id) ? "Halo Boss XdpzQ! Gunakan /adduser untuk buat VIP." : "Halo! Selamat datang di XdpzQ-AI.";
+        ctx.replyWithMarkdown(msg, getMainMenu(ctx.from.id));
     });
 
-    // --- OWNER ONLY: ADD VIP ---
     bot.command('adduser', async (ctx) => {
         if (!isOwner(ctx.from.id)) return;
-        await redis.set(`state:${ctx.from.id}`, 'vip_step_1', { ex: 300 });
-        ctx.reply("🛠️ *Mode VIP*\n\nMasukkan Nama AI:");
+        await redis.set(`state:${ctx.from.id}`, 'vip_1');
+        ctx.reply("🛠️ *Mode VIP*\nMasukkan Nama AI yang diinginkan:");
     });
 
-    // --- USER: UPLOAD TOKEN ---
-    bot.action('upload_token', async (ctx) => {
-        await redis.set(`state:${ctx.from.id}`, 'waiting_token', { ex: 300 });
+    bot.command('delkey', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return;
+        const index = parseInt(ctx.payload) - 1;
+        const keys = await redis.smembers('apikeys:pool');
+        if (keys[index]) {
+            await redis.srem('apikeys:pool', keys[index]);
+            ctx.reply(`✅ Key nomor ${index+1} dihapus.`);
+        } else {
+            ctx.reply("Format: /delkey 1");
+        }
+    });
+
+    // --- CALLBACK ACTIONS (TOMBOL) ---
+    bot.action('setup_key', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
+        await redis.set(`state:${ctx.from.id}`, 'awaiting_key');
         ctx.answerCbQuery();
-        ctx.reply("🎟️ Masukkan Token VIP Anda:");
+        ctx.reply('Kirimkan API Key OpenRouter baru:');
     });
 
-    // --- HANDLER PESAN ---
+    bot.action('list_keys', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
+        const keys = await redis.smembers('apikeys:pool');
+        ctx.answerCbQuery();
+        let txt = "📜 *LIST API KEY*\n\n";
+        keys.forEach((k, i) => txt += `${i+1}. \`${k.substring(0,10)}...\`\n`);
+        ctx.replyWithMarkdown(txt + "\nHapus dengan /delkey <nomor>");
+    });
+
+    bot.action('info_user', async (ctx) => {
+        const keys = await redis.smembers('apikeys:pool');
+        const vipToken = await redis.get(`user_vip:${ctx.from.id}`);
+        ctx.answerCbQuery();
+        ctx.replyWithMarkdown(`📊 *INFO SISTEM*\n\n🔑 API Pool: ${keys.length}\n🌟 Status: ${vipToken ? 'VIP Member' : 'Standar'}`);
+    });
+
+    bot.action('view_owner', async (ctx) => {
+        let name = config.owner.name;
+        const vipToken = await redis.get(`user_vip:${ctx.from.id}`);
+        if (vipToken) {
+            const data = await redis.get(`vip_token:${vipToken}`);
+            if (data) name = data.ownerName;
+        }
+        ctx.answerCbQuery();
+        ctx.replyWithMarkdown(`👤 *OWNER INFO*\n\nNama: ${name}\nWA: ${config.owner.whatsapp}`, 
+        Markup.inlineKeyboard([[Markup.button.url('WhatsApp', config.owner.waLink)]]));
+    });
+
+    bot.action('upload_token', async (ctx) => {
+        await redis.set(`state:${ctx.from.id}`, 'waiting_token');
+        ctx.answerCbQuery();
+        ctx.reply("🎟️ Silakan kirimkan Token VIP Anda:");
+    });
+
+    // --- HANDLER PESAN TEKS ---
     bot.on('text', async (ctx) => {
         const userId = ctx.from.id;
         const text = ctx.message.text;
         const state = await redis.get(`state:${userId}`);
 
-        // Logic Buat Token (Step 1 & 2)
-        if (state === 'vip_step_1' && isOwner(userId)) {
+        // 1. Logic Create VIP (Owner)
+        if (state === 'vip_1' && isOwner(userId)) {
             await redis.set(`temp_vip:${userId}`, JSON.stringify({ aiName: text }));
-            await redis.set(`state:${userId}`, 'vip_step_2', { ex: 300 });
-            return ctx.reply(`Nama AI: ${text}\n\nMasukkan Nama Owner VIP-nya:`);
+            await redis.set(`state:${userId}`, 'vip_2');
+            return ctx.reply("Nama AI Terinput. Sekarang masukkan Nama Owner VIP:");
         }
-        if (state === 'vip_step_2' && isOwner(userId)) {
-            const tempData = await redis.get(`temp_vip:${userId}`);
+        if (state === 'vip_2' && isOwner(userId)) {
+            const temp = await redis.get(`temp_vip:${userId}`);
             const tokenVIP = crypto.randomBytes(3).toString('hex').toUpperCase();
-            await redis.set(`vip_token:${tokenVIP}`, { aiName: tempData.aiName, ownerName: text });
+            await redis.set(`vip_token:${tokenVIP}`, { aiName: temp.aiName, ownerName: text });
             await redis.del(`state:${userId}`);
-            return ctx.replyWithMarkdown(`✅ *VIP TOKEN: \`${tokenVIP}\`*\nAI: ${tempData.aiName}\nOwner: ${text}`);
+            return ctx.replyWithMarkdown(`✅ *TOKEN VIP: \`${tokenVIP}\`*\nAI: ${temp.aiName}\nOwner: ${text}`);
         }
 
-        // Logic Upload Token
+        // 2. Logic Upload Token (User)
         if (state === 'waiting_token') {
             const data = await redis.get(`vip_token:${text.toUpperCase()}`);
-            if (!data) return ctx.reply("❌ Token salah!");
+            if (!data) return ctx.reply("❌ Token Salah!");
             await redis.set(`user_vip:${userId}`, text.toUpperCase());
             await redis.del(`state:${userId}`);
-            return ctx.reply(`✅ Berhasil! Nama AI: ${data.aiName}, Owner AI: ${data.ownerName}`);
+            return ctx.reply(`✅ VIP AKTIF!\nAI: ${data.aiName}\nOwner: ${data.ownerName}`);
         }
 
-        // Logic Tambah API Key
+        // 3. Logic Tambah API Key (Owner)
         if (state === 'awaiting_key' && isOwner(userId)) {
+            if (!text.startsWith('sk-or-')) return ctx.reply("❌ Salah format!");
             await redis.sadd('apikeys:pool', text.trim());
             await redis.del(`state:${userId}`);
-            return ctx.reply('✅ Key ditambahkan!');
+            return ctx.reply("✅ Key ditambahkan!");
         }
 
         if (text.startsWith('/')) return;
 
-        // --- PROSES CHAT AI ---
+        // --- 4. LOGIKA CHAT AI (SEMUA USER) ---
         const keys = await redis.smembers('apikeys:pool');
-        if (keys.length === 0) return ctx.reply('⚠️ API Key Pool Kosong.');
+        if (keys.length === 0) return ctx.reply("⚠️ Bot sedang tidak memiliki API Key.");
 
-        // AMBIL IDENTITAS (DEFAULT ATAU VIP)
-        let currentAiName = config.botName;
-        let currentOwnerName = config.defaultOwnerName;
-
-        const userVipToken = await redis.get(`user_vip:${userId}`);
-        if (userVipToken) {
-            const vipData = await redis.get(`vip_token:${userVipToken}`);
-            if (vipData) {
-                currentAiName = vipData.aiName;
-                currentOwnerName = vipData.ownerName;
-            }
+        let aiName = config.botName;
+        let ownerName = config.defaultOwnerName;
+        const userVip = await redis.get(`user_vip:${userId}`);
+        if (userVip) {
+            const d = await redis.get(`vip_token:${userVip}`);
+            if (d) { aiName = d.aiName; ownerName = d.ownerName; }
         }
 
         await ctx.sendChatAction('typing');
 
-        // Logic Failover API
         let success = false;
         let attempt = 0;
         while (!success && attempt < Math.min(keys.length, 3)) {
             const currentKey = keys[attempt];
             try {
-                const response = await axios.post(
-                    'https://openrouter.ai/api/v1/chat/completions',
-                    {
-                        model: 'deepseek/deepseek-chat',
-                        messages: [
-                            // INI KUNCINYA: Memasukkan Persona Dinamis
-                            { role: 'system', content: config.persona(currentAiName, currentOwnerName) },
-                            { role: 'user', content: text }
-                        ]
-                    },
-                    { headers: { 'Authorization': `Bearer ${currentKey}` }, timeout: 45000 }
-                );
+                const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+                    model: 'deepseek/deepseek-chat',
+                    messages: [
+                        { role: 'system', content: config.persona(aiName, ownerName) },
+                        { role: 'user', content: text }
+                    ]
+                }, { headers: { 'Authorization': `Bearer ${currentKey}` }, timeout: 50000 });
 
-                const aiResponse = response.data.choices?.[0]?.message?.content;
-                await ctx.reply(aiResponse);
+                const aiMsg = response.data.choices[0].message.content;
+                await ctx.reply(aiMsg);
 
-                // Kirim Script File
-                const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+                // Kirim script sebagai file
+                const codeRegex = /```(\w*)\n([\s\S]*?)```/g;
                 let match;
-                while ((match = codeBlockRegex.exec(aiResponse)) !== null) {
+                while ((match = codeRegex.exec(aiMsg)) !== null) {
                     await ctx.replyWithDocument({
                         source: Buffer.from(match[2].trim(), 'utf-8'),
                         filename: `script_${Date.now()}.txt`
                     });
                 }
                 success = true;
-            } catch (error) {
-                if (error.response?.status === 401 || error.response?.status === 402) {
+            } catch (e) {
+                if (e.response?.status === 401 || e.response?.status === 402) {
                     await redis.srem('apikeys:pool', currentKey);
                     attempt++;
                 } else { break; }
             }
         }
-        if (!success) ctx.reply('❌ Gagal.');
+        if (!success) ctx.reply("❌ Gagal merespon.");
     });
-
-    // Handler buttons (setup_key, list_keys, info_user, view_owner) ...
-    // ... (sesuai kode sebelumnya)
 
     if (req.method === 'POST') {
         await bot.handleUpdate(req.body);
         res.status(200).send('OK');
     } else {
-        res.status(200).send('Bot Running');
+        res.status(200).send('Running');
     }
 };
