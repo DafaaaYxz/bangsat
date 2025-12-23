@@ -3,6 +3,7 @@ const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis');
 
+// Inisialisasi Database Redis (Ingatan Bot)
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
@@ -10,75 +11,97 @@ const redis = new Redis({
 
 module.exports = async (req, res) => {
     const token = process.env.BOT_TOKEN;
-    if (!token) return res.status(200).send('Token missing');
-    
+    if (!token) return res.status(200).send('Bot Token missing');
     const bot = new Telegraf(token);
 
-    bot.start((ctx) => ctx.reply('Bot Gemini Aktif!\n/upkey - Set API Key\n/info - Cek Status'));
+    bot.start((ctx) => {
+        ctx.reply('Halo! Saya Bot AI DeepSeek.\n\nPerintah:\n/upkey - Masukkan API Key OpenRouter\n/info - Cek status Key Anda\n\nKirim pesan teks untuk mulai chat.');
+    });
 
     bot.command('upkey', async (ctx) => {
         await redis.set(`state:${ctx.from.id}`, 'awaiting_key', { ex: 300 });
-        ctx.reply('Silakan kirim API Key Gemini Anda:');
+        ctx.reply('Silakan kirim API Key OpenRouter Anda (sk-or-v1-...):');
+    });
+
+    bot.command('info', async (ctx) => {
+        const userKey = await redis.get(`apikey:${ctx.from.id}`);
+        const status = userKey ? "✅ Tersimpan" : "❌ Belum ada Key";
+        ctx.reply(`👤 *Status User*\nID: \`${ctx.from.id}\` \nAPI Key: ${status}`, { parse_mode: 'Markdown' });
     });
 
     bot.on('text', async (ctx) => {
         const userId = ctx.from.id;
         const text = ctx.message.text;
 
+        // 1. Cek State (Apakah sedang input key?)
         const state = await redis.get(`state:${userId}`);
         if (state === 'awaiting_key') {
             const cleanKey = text.trim();
+            if (!cleanKey.startsWith('sk-or-')) {
+                return ctx.reply('❌ Format salah! Key OpenRouter biasanya diawali "sk-or-v1-". Coba /upkey lagi.');
+            }
             await redis.set(`apikey:${userId}`, cleanKey);
             await redis.del(`state:${userId}`);
-            return ctx.reply('✅ API Key berhasil disimpan!');
+            return ctx.reply('✅ API Key DeepSeek Berhasil Disimpan! Silakan mulai chat.');
         }
 
-        const userApiKey = await redis.get(`apikey:${userId}`);
-        if (!userApiKey) return ctx.reply('⚠️ Klik /upkey dulu.');
         if (text.startsWith('/')) return;
+
+        // 2. Ambil API Key User dari Redis
+        const userApiKey = await redis.get(`apikey:${userId}`);
+        if (!userApiKey) {
+            return ctx.reply('⚠️ Kamu belum memasukkan API Key.\nKetik /upkey untuk memulai.');
+        }
 
         await ctx.sendChatAction('typing');
 
         try {
-            // PERUBAHAN DISINI: Menggunakan v1 (bukan v1beta) dan model gemini-1.5-flash
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${userApiKey}`;
-            
-            const response = await axios.post(geminiUrl, {
-                contents: [{
-                    parts: [{ text: text }]
-                }]
-            }, {
-                headers: { 'Content-Type': 'application/json' }
-            });
+            // Request ke OpenRouter (DeepSeek)
+            const response = await axios.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                {
+                    model: 'deepseek/deepseek-chat', // Atau 'nex-agi/deepseek-v3.1-nex-n1:free'
+                    messages: [{ role: 'user', content: text }]
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${userApiKey}`,
+                        'Content-Type': 'application/json',
+                        'HTTP-Referer': 'https://vercel.com', // Syarat OpenRouter
+                    },
+                    timeout: 40000 // DeepSeek kadang lambat, beri waktu lebih
+                }
+            );
 
-            // Ambil jawaban
-            if (response.data.candidates && response.data.candidates[0].content) {
-                const aiText = response.data.candidates[0].content.parts[0].text;
-                await ctx.reply(aiText);
+            const aiResponse = response.data.choices?.[0]?.message?.content;
+            if (aiResponse) {
+                await ctx.reply(aiResponse);
             } else {
-                ctx.reply('☁️ Gemini tidak memberikan jawaban (mungkin karena filter keamanan).');
+                ctx.reply('☁️ DeepSeek tidak memberikan respon. Coba lagi.');
             }
 
         } catch (error) {
-            console.error('ERROR:', error.response?.data || error.message);
+            console.error('DEEPSEEK ERROR:', error.response?.data || error.message);
+            const errStatus = error.response?.status;
             
-            const errStatus = error.response?.data?.error?.status;
-            const errMsg = error.response?.data?.error?.message;
-
-            if (errStatus === "INVALID_ARGUMENT") {
-                ctx.reply(`❌ Format salah atau model tidak didukung. Pesan: ${errMsg}`);
-            } else if (errStatus === "UNAUTHENTICATED") {
-                ctx.reply('❌ API Key salah. Silakan /upkey ulang.');
+            if (errStatus === 401) {
+                ctx.reply('❌ API Key salah atau sudah kadaluarsa. Silakan /upkey ulang.');
+            } else if (errStatus === 402) {
+                ctx.reply('❌ Saldo OpenRouter Anda habis.');
             } else {
-                ctx.reply(`❌ Google API Error: ${errMsg || 'Koneksi terputus'}`);
+                ctx.reply('❌ Terjadi gangguan pada koneksi DeepSeek/OpenRouter.');
             }
         }
     });
 
-    if (req.method === 'POST') {
-        await bot.handleUpdate(req.body);
-        res.status(200).send('OK');
-    } else {
-        res.status(200).send('Bot Running');
+    try {
+        if (req.method === 'POST') {
+            await bot.handleUpdate(req.body);
+            res.status(200).send('OK');
+        } else {
+            res.status(200).send('Bot is running');
+        }
+    } catch (err) {
+        res.status(200).send('Error');
     }
 };
