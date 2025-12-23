@@ -14,24 +14,40 @@ module.exports = async (req, res) => {
     if (!token) return res.status(200).send('Bot Token missing');
     const bot = new Telegraf(token);
 
-    const mainMenu = Markup.inlineKeyboard([
-        [Markup.button.callback('🔑 Set API Key', 'setup_key'), Markup.button.callback('📊 Info Akun', 'info_user')],
-        [Markup.button.callback('👤 Owner', 'view_owner')]
-    ]);
+    // Filter Owner
+    const isOwner = (id) => id.toString() === config.ownerId;
 
-    bot.start((ctx) => ctx.replyWithMarkdown(config.messages.welcome, mainMenu));
+    // --- MENU BUTTONS ---
+    const getMenu = (userId) => {
+        const buttons = [
+            [Markup.button.callback('📊 Info Sistem', 'info_user')],
+            [Markup.button.callback('👤 Owner', 'view_owner')]
+        ];
+        // Jika owner, tambahkan tombol Set API Key
+        if (isOwner(userId)) {
+            buttons.unshift([Markup.button.callback('⚙️ Set API Key Global', 'setup_key')]);
+        }
+        return Markup.inlineKeyboard(buttons);
+    };
 
+    bot.start((ctx) => {
+        const msg = isOwner(ctx.from.id) ? config.messages.welcomeOwner : config.messages.welcome;
+        ctx.replyWithMarkdown(msg, getMenu(ctx.from.id));
+    });
+
+    // Action: Set Key (Hanya Owner)
     bot.action('setup_key', async (ctx) => {
-        await redis.set(`state:${ctx.from.id}`, 'awaiting_key', { ex: 300 });
+        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak!');
+        await redis.set(`state:${ctx.from.id}`, 'awaiting_global_key', { ex: 300 });
         ctx.answerCbQuery();
-        ctx.reply('Silakan kirimkan API Key OpenRouter Anda:');
+        ctx.reply('Boss, silakan kirim API Key OpenRouter baru untuk SEMUA USER:');
     });
 
     bot.action('info_user', async (ctx) => {
-        const userKey = await redis.get(`apikey:${ctx.from.id}`);
-        const status = userKey ? "✅ Tersimpan" : "❌ Belum ada";
+        const globalKey = await redis.get('apikey:global');
+        const status = globalKey ? "✅ AKTIF" : "❌ MATI (Owner belum set key)";
         ctx.answerCbQuery();
-        ctx.replyWithMarkdown(config.messages.info(status, ctx.from.id), mainMenu);
+        ctx.replyWithMarkdown(config.messages.info(status, ctx.from.id), getMenu(ctx.from.id));
     });
 
     bot.action('view_owner', (ctx) => {
@@ -40,24 +56,27 @@ module.exports = async (req, res) => {
         Markup.inlineKeyboard([[Markup.button.url('Hubungi via WhatsApp', config.owner.waLink)]]));
     });
 
+    // --- HANDLER PESAN ---
     bot.on('text', async (ctx) => {
         const userId = ctx.from.id;
         const text = ctx.message.text;
 
-        // Handler Input API Key
+        // 1. Logika Update Key Global (Hanya Owner)
         const state = await redis.get(`state:${userId}`);
-        if (state === 'awaiting_key') {
-            if (!text.startsWith('sk-or-')) return ctx.reply('❌ Key tidak valid!');
-            await redis.set(`apikey:${userId}`, text.trim());
+        if (state === 'awaiting_global_key' && isOwner(userId)) {
+            if (!text.startsWith('sk-or-')) return ctx.reply('❌ Key tidak valid, Boss!');
+            await redis.set('apikey:global', text.trim());
             await redis.del(`state:${userId}`);
-            return ctx.reply('✅ API Key disimpan! Silakan tanya apa saja.', mainMenu);
+            return ctx.reply('✅ MANTAP! API Key Global berhasil diperbarui. Semua user sekarang bisa pakai.', getMenu(userId));
         }
 
         if (text.startsWith('/')) return;
 
-        // Cek API Key
-        const userApiKey = await redis.get(`apikey:${userId}`);
-        if (!userApiKey) return ctx.reply('⚠️ Klik /upkey dulu bos.', mainMenu);
+        // 2. Ambil Key Global untuk Semua User
+        const globalApiKey = await redis.get('apikey:global');
+        if (!globalApiKey) {
+            return ctx.reply('⚠️ Maaf, Bot sedang maintenance (API Key belum diatur oleh owner). Silakan hubungi /owner.');
+        }
 
         await ctx.sendChatAction('typing');
 
@@ -71,52 +90,37 @@ module.exports = async (req, res) => {
                         { role: 'user', content: text }
                     ]
                 },
-                { headers: { 'Authorization': `Bearer ${userApiKey}` }, timeout: 50000 }
+                { headers: { 'Authorization': `Bearer ${globalApiKey}` }, timeout: 60000 }
             );
 
             const aiResponse = response.data.choices?.[0]?.message?.content;
-            if (!aiResponse) return ctx.reply("☁️ AI tidak merespon.");
+            if (!aiResponse) return ctx.reply("☁️ AI sedang sibuk.");
 
-            // --- LOGIKA DETEKSI SCRIPT/KODE ---
-            // Regex untuk mencari blok kode ```language ... ```
-            const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
-            let match;
-            let foundCode = false;
-
-            // Kita kirim pesan teks aslinya dulu
+            // KIRIM TEKS ASLI
             await ctx.reply(aiResponse);
 
-            // Cari semua blok kode dan kirim sebagai file
+            // LOGIKA KIRIM SCRIPT SEBAGAI FILE
+            const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+            let match;
             while ((match = codeBlockRegex.exec(aiResponse)) !== null) {
-                foundCode = true;
-                const language = match[1] || 'txt'; // default ke txt jika bahasa tidak disebut
+                const language = match[1] || 'txt';
                 const codeContent = match[2].trim();
-                
-                // Buat nama file unik
-                const filename = `script_${userId}_${Math.floor(Date.now() / 1000)}.${getExt(language)}`;
+                const filename = `script_${Math.floor(Date.now() / 1000)}.${getExt(language)}`;
 
-                // Kirim file menggunakan Buffer (Tanpa simpan di disk)
                 await ctx.replyWithDocument({
                     source: Buffer.from(codeContent, 'utf-8'),
                     filename: filename
-                }, {
-                    caption: `📄 File script (${language}) berhasil dibuat.`
-                });
+                }, { caption: `📄 Script ${language.toUpperCase()}` });
             }
 
         } catch (error) {
-            console.error(error);
-            ctx.reply('❌ Gagal menghubungi AI. Pastikan saldo Key Anda mencukupi.');
+            console.error('API Error:', error.response?.data || error.message);
+            ctx.reply('❌ Gagal memproses permintaan. Mungkin kuota API Owner habis.');
         }
     });
 
-    // Helper untuk menentukan ekstensi file
     function getExt(lang) {
-        const extMap = {
-            'javascript': 'js', 'js': 'js', 'python': 'py', 'py': 'py',
-            'html': 'html', 'css': 'css', 'php': 'php', 'java': 'java',
-            'cpp': 'cpp', 'c': 'c', 'json': 'json', 'typescript': 'ts', 'ts': 'ts'
-        };
+        const extMap = { 'js': 'js', 'javascript': 'js', 'py': 'py', 'python': 'py', 'html': 'html', 'css': 'css', 'php': 'php' };
         return extMap[lang.toLowerCase()] || 'txt';
     }
 
