@@ -1,3 +1,4 @@
+
 const { Markup } = require('telegraf');
 
 module.exports = {
@@ -11,6 +12,7 @@ module.exports = {
             [Markup.button.callback('🎟️ Upload Token VIP', 'upload_token')]
         ];
         if (isOwner) {
+            // Perhatikan ID 'setup_key' dan 'list_keys'
             buttons.unshift([Markup.button.callback('➕ API Key', 'setup_key'), Markup.button.callback('📜 List Keys', 'list_keys')]);
             buttons.push([Markup.button.callback('👥 List User VIP', 'list_user')]);
         }
