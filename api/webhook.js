@@ -18,67 +18,59 @@ module.exports = async (req, res) => {
 
     bot.command('upkey', async (ctx) => {
         await redis.set(`state:${ctx.from.id}`, 'awaiting_key', { ex: 300 });
-        ctx.reply('Silakan kirim API Key Gemini Anda dari Google AI Studio:');
+        ctx.reply('Silakan kirim API Key Gemini Anda:');
     });
 
     bot.on('text', async (ctx) => {
         const userId = ctx.from.id;
         const text = ctx.message.text;
 
-        // 1. Logika simpan API Key
         const state = await redis.get(`state:${userId}`);
         if (state === 'awaiting_key') {
-            const cleanKey = text.trim(); // Bersihkan spasi/enter
+            const cleanKey = text.trim();
             await redis.set(`apikey:${userId}`, cleanKey);
             await redis.del(`state:${userId}`);
-            return ctx.reply('✅ API Key berhasil disimpan! Silakan chat sekarang.');
+            return ctx.reply('✅ API Key berhasil disimpan!');
         }
 
-        // 2. Ambil API Key
         const userApiKey = await redis.get(`apikey:${userId}`);
-        if (!userApiKey) return ctx.reply('⚠️ Klik /upkey dulu bos.');
-
+        if (!userApiKey) return ctx.reply('⚠️ Klik /upkey dulu.');
         if (text.startsWith('/')) return;
 
         await ctx.sendChatAction('typing');
 
         try {
-            // Gunakan model gemini-1.5-flash (lebih stabil & gratis)
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${userApiKey}`;
+            // PERUBAHAN DISINI: Menggunakan v1 (bukan v1beta) dan model gemini-1.5-flash
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${userApiKey}`;
             
             const response = await axios.post(geminiUrl, {
-                contents: [{ parts: [{ text: text }] }],
-                // Tambahkan ini agar AI tidak terlalu sensitif (opsional)
-                safetySettings: [
-                    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-                    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" }
-                ]
+                contents: [{
+                    parts: [{ text: text }]
+                }]
             }, {
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 20000 
+                headers: { 'Content-Type': 'application/json' }
             });
 
-            // Cek apakah ada jawaban dari AI
-            const candidate = response.data.candidates?.[0];
-            
-            if (candidate && candidate.content) {
-                const aiText = candidate.content.parts[0].text;
+            // Ambil jawaban
+            if (response.data.candidates && response.data.candidates[0].content) {
+                const aiText = response.data.candidates[0].content.parts[0].text;
                 await ctx.reply(aiText);
             } else {
-                // Biasanya kena sensor Google
-                ctx.reply('☁️ AI tidak bisa menjawab pesan ini karena kebijakan keamanan Google.');
+                ctx.reply('☁️ Gemini tidak memberikan jawaban (mungkin karena filter keamanan).');
             }
 
         } catch (error) {
-            console.error('ERROR DETAIL:', error.response?.data || error.message);
+            console.error('ERROR:', error.response?.data || error.message);
             
-            const errData = error.response?.data?.error;
-            if (errData?.status === "UNAUTHENTICATED") {
-                ctx.reply('❌ API KEY SALAH. Silakan /upkey ulang dengan key yang benar.');
-            } else if (errData?.status === "RESOURCE_EXHAUSTED") {
-                ctx.reply('❌ Kuota API Key habis (Limit tercapai).');
+            const errStatus = error.response?.data?.error?.status;
+            const errMsg = error.response?.data?.error?.message;
+
+            if (errStatus === "INVALID_ARGUMENT") {
+                ctx.reply(`❌ Format salah atau model tidak didukung. Pesan: ${errMsg}`);
+            } else if (errStatus === "UNAUTHENTICATED") {
+                ctx.reply('❌ API Key salah. Silakan /upkey ulang.');
             } else {
-                ctx.reply(`❌ Error: ${errData?.message || 'Terjadi masalah koneksi ke Google.'}`);
+                ctx.reply(`❌ Google API Error: ${errMsg || 'Koneksi terputus'}`);
             }
         }
     });
@@ -87,6 +79,6 @@ module.exports = async (req, res) => {
         await bot.handleUpdate(req.body);
         res.status(200).send('OK');
     } else {
-        res.status(200).send('Running');
+        res.status(200).send('Bot Running');
     }
 };
