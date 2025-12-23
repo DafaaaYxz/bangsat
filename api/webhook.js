@@ -1,77 +1,82 @@
 
 const { Telegraf } = require('telegraf');
 const axios = require('axios');
+const { Redis } = require('@upstash/redis');
+
+// Inisialisasi Database Redis (Untuk simpan API Key)
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 module.exports = async (req, res) => {
     const token = process.env.BOT_TOKEN;
-    const ownerId = process.env.OWNER_ID; // ID Owner Utama
-    const vipIds = process.env.VIP_IDS ? process.env.VIP_IDS.split(',') : []; // List ID VIP (koma)
-    
-    // API Key Default dari Anda
-    const defaultAiKey = "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";
+    const ownerId = process.env.OWNER_ID;
 
     if (!token) return res.status(200).send('Token missing');
-
     const bot = new Telegraf(token);
 
-    // Fitur /start
+    // 1. Fitur /start
     bot.start((ctx) => {
-        ctx.reply('Halo! Bot AI DeepSeek sudah aktif untuk SEMUA USER.\n\nKirim pesan teks apa saja, saya akan menjawab menggunakan AI.');
+        ctx.reply('Selamat datang di Bot Gemini AI!\n\nPerintah:\n/upkey - Untuk mendaftarkan API Key Gemini\n/info - Cek status akun');
     });
 
-    // Fitur /ping
-    bot.command('ping', (ctx) => ctx.reply('pong!'));
+    // 2. Fitur /upkey (Proses pendaftaran Key)
+    bot.command('upkey', async (ctx) => {
+        // Simpan status bahwa user ini sedang ingin menginput key
+        await redis.set(`state:${ctx.from.id}`, 'awaiting_key', { ex: 300 }); // Expire 5 menit
+        ctx.reply('Silakan kirim API Key Gemini AI Studio Anda:');
+    });
 
-    // Fitur /info (Cek Status)
-    bot.command('info', (ctx) => {
-        const userId = ctx.from.id.toString();
-        let status = 'User Biasa';
-        
-        if (userId === ownerId) {
-            status = '👑 Owner (Full Access)';
-        } else if (vipIds.includes(userId)) {
-            status = '🌟 VIP Member';
+    // 3. Fitur /info
+    bot.command('info', async (ctx) => {
+        const userKey = await redis.get(`apikey:${ctx.from.id}`);
+        const status = userKey ? "✅ Aktif (Sudah ada Key)" : "❌ Belum Aktif (Gunakan /upkey)";
+        ctx.reply(`📌 *INFO USER*\nID: \`${ctx.from.id}\`\nStatus: ${status}`, { parse_mode: 'Markdown' });
+    });
+
+    // 4. Handler Pesan (Input Key atau Chat AI)
+    bot.on('text', async (ctx) => {
+        const userId = ctx.from.id;
+        const text = ctx.message.text;
+
+        // Cek apakah user sedang dalam proses input key
+        const state = await redis.get(`state:${userId}`);
+
+        if (state === 'awaiting_key') {
+            // Simpan API Key ke database secara permanen
+            await redis.set(`apikey:${userId}`, text);
+            await redis.del(`state:${userId}`); // Hapus state
+            return ctx.reply('✅ API Key berhasil disimpan! Sekarang kamu bisa chat langsung dengan bot.');
         }
 
-        ctx.reply(`📌 *INFO USER*\n\n👤 Nama: ${ctx.from.first_name}\n🆔 ID: \`${userId}\` \n📊 Status: ${status}`, { parse_mode: 'Markdown' });
-    });
+        // --- PROSES CHAT AI GEMINI ---
+        const userApiKey = await redis.get(`apikey:${userId}`);
 
-    // Fitur AI Chat (Terbuka untuk Umum)
-    bot.on('text', async (ctx) => {
-        const userMessage = ctx.message.text;
-        
-        // Abaikan jika pesan adalah command (diawali /)
-        if (userMessage.startsWith('/')) return;
+        if (!userApiKey) {
+            return ctx.reply('⚠️ Kamu belum punya API Key. Silakan ketik /upkey terlebih dahulu.');
+        }
 
         await ctx.sendChatAction('typing');
 
         try {
-            const response = await axios.post(
-                'https://openrouter.ai/api/v1/chat/completions',
-                {
-                    model: 'nex-agi/deepseek-v3.1-nex-n1:free',
-                    messages: [{ role: 'user', content: userMessage }]
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${defaultAiKey}`,
-                        'Content-Type': 'application/json',
-                        'HTTP-Referer': 'https://vercel.com', // Opsional untuk OpenRouter
-                    },
-                    timeout: 25000 // Set timeout 25 detik (Vercel hobby plan max 10-60s)
-                }
-            );
+            // URL Google Gemini AI Studio
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${userApiKey}`;
+            
+            const response = await axios.post(geminiUrl, {
+                contents: [{ parts: [{ text: text }] }]
+            });
 
-            const aiResponse = response.data.choices[0]?.message?.content || "Maaf, AI tidak memberikan respon.";
-            await ctx.reply(aiResponse);
+            const aiText = response.data.candidates[0].content.parts[0].text;
+            ctx.reply(aiText);
 
         } catch (error) {
-            console.error('AI Error:', error.response?.data || error.message);
-            
-            if (error.response?.status === 401) {
-                ctx.reply('⚠️ Error: API Key AI tidak valid atau sudah expired.');
+            console.error('Gemini Error:', error.response?.data || error.message);
+            const errorMsg = error.response?.data?.error?.message || "";
+            if (errorMsg.includes('API_KEY_INVALID')) {
+                ctx.reply('❌ API Key tidak valid. Silakan /upkey ulang.');
             } else {
-                ctx.reply('❌ Maaf, layanan AI sedang gangguan. Silakan coba lagi nanti.');
+                ctx.reply('❌ Terjadi kesalahan pada server Gemini. Coba lagi nanti.');
             }
         }
     });
@@ -81,10 +86,9 @@ module.exports = async (req, res) => {
             await bot.handleUpdate(req.body);
             res.status(200).send('OK');
         } else {
-            res.status(200).send('Bot berjalan normal...');
+            res.status(200).send('Bot is running...');
         }
     } catch (err) {
-        console.error('Webhook Error:', err);
         res.status(200).send('Error');
     }
 };
