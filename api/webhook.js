@@ -1,5 +1,5 @@
 
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const crypto = require('crypto');
 const config = require('./config');
 const redis = require('./_lib/db');
@@ -10,166 +10,166 @@ module.exports = async (req, res) => {
     const bot = new Telegraf(process.env.BOT_TOKEN);
     const isOwner = (id) => id.toString() === config.ownerId;
 
-    // --- START & MENU ---
     bot.start((ctx) => {
         ctx.replyWithMarkdown("👋 *Selamat Datang!*\n\nUntuk pergi ke menu klik button menu di bawah ini:", ui.startMenu);
     });
 
     const showMenu = async (ctx) => {
-        const caption = `✨ *Welcome to ${config.botName}*\n\nSilakan pilih menu di bawah ini untuk mengelola akun atau bertanya kepada AI.`;
+        const caption = `✨ *Welcome to ${config.botName}*\n\nSilakan pilih menu di bawah ini.`;
         await ctx.replyWithPhoto(config.menuImage, {
-            caption: caption,
-            parse_mode: 'Markdown',
-            ...ui.mainMenu(isOwner(ctx.from.id))
+            caption, parse_mode: 'Markdown', ...ui.mainMenu(isOwner(ctx.from.id))
         });
     };
 
     bot.command('menu', showMenu);
     bot.action('open_menu', (ctx) => { ctx.answerCbQuery(); showMenu(ctx); });
 
-    // --- OWNER ACTIONS (FIXED) ---
-    bot.action('setup_key', async (ctx) => {
-        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
-        await redis.set(`state:${ctx.from.id}`, 'awaiting_key', { ex: 300 });
-        ctx.answerCbQuery();
-        ctx.reply("🔑 *MODE TAMBAH KEY*\nSilakan kirim API Key OpenRouter Anda (sk-or-v1-...):");
+    // --- FITUR EDIT USER (FIXED) ---
+    bot.command('edituser', async (ctx) => {
+        if (!isOwner(ctx.from.id)) return;
+        const targetId = ctx.payload.trim();
+        if (!targetId) return ctx.reply("Gunakan: /edituser <ID>");
+        
+        const hasToken = await redis.get(`user_vip:${targetId}`);
+        if (!hasToken) return ctx.reply("❌ User tidak memiliki VIP.");
+
+        ctx.reply(`🔄 *Update User:* \`${targetId}\`\nPilih bagian yang ingin diubah:`, ui.editUserMenu(targetId));
     });
 
-    bot.action('list_keys', async (ctx) => {
-        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
-        ctx.answerCbQuery();
-        const keys = await redis.smembers('apikeys:pool');
-        if (keys.length === 0) return ctx.reply("⚠️ Pool API Key kosong.");
-
-        let txt = "📜 *DAFTAR API KEY ANDA*\n\n";
-        keys.forEach((k, i) => {
-            txt += `${i + 1}. \`${k.substring(0, 15)}...\`\n`;
+    // Action Handler untuk milih bagian Edit
+    const editParts = ['edit_ai', 'edit_own', 'edit_wa'];
+    editParts.forEach(part => {
+        bot.action(new RegExp(`${part}:(.+)`), async (ctx) => {
+            const targetId = ctx.match[1];
+            const field = part.split('_')[1];
+            await redis.set(`state:${ctx.from.id}`, `process_edit:${field}:${targetId}`, { ex: 300 });
+            ctx.answerCbQuery();
+            const label = field === 'ai' ? 'Nama AI' : field === 'own' ? 'Nama Owner' : 'Nomor WhatsApp';
+            ctx.reply(`Silakan masukkan *${label}* baru untuk user \`${targetId}\`:`, { parse_mode: 'Markdown' });
         });
-        txt += "\n_Hapus dengan /delkey <nomor>_";
-        ctx.replyWithMarkdown(txt);
-    });
-
-    bot.action('list_user', async (ctx) => {
-        if (!isOwner(ctx.from.id)) return ctx.answerCbQuery();
-        ctx.answerCbQuery();
-        const keys = await redis.keys('user_vip:*');
-        let txt = "👥 *USER VIP LIST*\n\n";
-        for (const k of keys) {
-            const id = k.split(':')[1];
-            const token = await redis.get(k);
-            const data = await redis.get(`vip_token:${token}`);
-            txt += `👤 ID: \`${id}\`\n🤖 AI: ${data?.aiName}\n🗑 /deluser ${id}\n\n`;
-        }
-        ctx.replyWithMarkdown(txt || "Belum ada user VIP.");
-    });
-
-    // --- USER ACTIONS ---
-    bot.action('info_user', async (ctx) => {
-        const chatCount = await redis.get(`chat_count:${ctx.from.id}`) || 0;
-        const isVip = await redis.get(`user_vip:${ctx.from.id}`);
-        ctx.answerCbQuery();
-        ctx.replyWithMarkdown(`📊 *INFO AKUN*\n\n🆔 ID: \`${ctx.from.id}\`\n🌟 Status: ${isVip ? 'VIP' : 'Standar'}\n💬 Total Chat: ${chatCount} kali`);
-    });
-
-    bot.action('view_owner', async (ctx) => {
-        let wa = config.defaultWa;
-        const vipToken = await redis.get(`user_vip:${ctx.from.id}`);
-        if (vipToken) {
-            const data = await redis.get(`vip_token:${vipToken}`);
-            if (data) wa = data.waNumber;
-        }
-        ctx.answerCbQuery();
-        ctx.replyWithMarkdown(`📱 *KONTAK OWNER*\n\nHubungi melalui tombol di bawah:`, 
-        { reply_markup: { inline_keyboard: [[{ text: 'WhatsApp', url: `https://wa.me/${wa.replace(/[^0-9]/g, '')}` }]] } });
-    });
-
-    bot.action('upload_token', (ctx) => {
-        redis.set(`state:${ctx.from.id}`, 'waiting_token', { ex: 300 });
-        ctx.answerCbQuery();
-        ctx.reply("🎟️ Silakan masukkan Token VIP Anda:");
     });
 
     // --- OWNER COMMANDS ---
     bot.command('adduser', async (ctx) => {
         if (!isOwner(ctx.from.id)) return;
-        await redis.set(`state:${ctx.from.id}`, 'vip_1');
+        await redis.set(`state:${ctx.from.id}`, 'vip_1', { ex: 300 });
         ctx.reply("🛠️ *TAMBAH VIP*\n1. Masukkan Nama AI:");
     });
 
-    bot.command('delkey', async (ctx) => {
+    bot.command('deluser', async (ctx) => {
         if (!isOwner(ctx.from.id)) return;
-        const index = parseInt(ctx.payload) - 1;
-        const keys = await redis.smembers('apikeys:pool');
-        if (keys[index]) {
-            await redis.srem('apikeys:pool', keys[index]);
-            ctx.reply(`✅ Key nomor ${index + 1} dihapus.`);
-        } else ctx.reply("Gunakan: /delkey 1");
+        const id = ctx.payload.trim();
+        await redis.del(`user_vip:${id}`);
+        ctx.reply(`✅ VIP User ${id} dihapus.`);
     });
 
-    // --- MESSAGE HANDLER (FIXED STATE LOGIC) ---
+    // --- OTHER ACTIONS ---
+    bot.action('setup_key', async (ctx) => {
+        await redis.set(`state:${ctx.from.id}`, 'awaiting_key', { ex: 300 });
+        ctx.answerCbQuery();
+        ctx.reply("🔑 Kirim API Key OpenRouter:");
+    });
+
+    bot.action('list_keys', async (ctx) => {
+        ctx.answerCbQuery();
+        const keys = await redis.smembers('apikeys:pool');
+        let txt = "📜 *POOL KEY*\n\n" + keys.map((k, i) => `${i+1}. \`${k.substring(0,10)}...\``).join('\n');
+        ctx.replyWithMarkdown(txt || "Kosong");
+    });
+
+    bot.action('list_user', async (ctx) => {
+        ctx.answerCbQuery();
+        const keys = await redis.keys('user_vip:*');
+        let txt = "👥 *LIST VIP*\n\n";
+        for (const k of keys) {
+            const id = k.split(':')[1];
+            const t = await redis.get(k);
+            const d = await redis.get(`vip_token:${t}`);
+            txt += `👤 \`${id}\` - AI: ${d?.aiName}\n`;
+        }
+        ctx.replyWithMarkdown(txt || "Kosong.");
+    });
+
+    bot.action('upload_token', (ctx) => {
+        ctx.answerCbQuery();
+        redis.set(`state:${ctx.from.id}`, 'waiting_token', { ex: 300 });
+        ctx.reply("🎟️ Masukkan Token VIP:");
+    });
+
+    // --- MESSAGE HANDLER (FIXED LOGIC) ---
     bot.on('text', async (ctx) => {
         const userId = ctx.from.id;
         const text = ctx.message.text;
         const state = await redis.get(`state:${userId}`);
 
-        // 1. Handle State Tambah API Key (FIXED)
-        if (state === 'awaiting_key' && isOwner(userId)) {
-            if (!text.startsWith('sk-or-')) return ctx.reply("❌ Salah! Key OpenRouter harus diawali 'sk-or-'.");
-            await redis.sadd('apikeys:pool', text.trim());
-            await redis.del(`state:${userId}`);
-            return ctx.reply("✅ API Key berhasil ditambahkan ke Pool Sistem!");
-        }
+        if (!state && text.startsWith('/')) return;
 
-        // 2. Handle State Add User VIP
-        if (state === 'vip_1') {
+        // 1. Logic ADD USER (FIXED STUCK)
+        if (state === 'vip_1' && isOwner(userId)) {
             await redis.set(`temp:${userId}`, JSON.stringify({ ai: text }));
-            await redis.set(`state:${userId}`, 'vip_2');
+            await redis.set(`state:${userId}`, 'vip_2', { ex: 300 });
             return ctx.reply("2. Masukkan Nama Owner:");
         }
-        if (state === 'vip_2') {
-            const temp = JSON.parse(await redis.get(`temp:${userId}`));
-            await redis.set(`temp:${userId}`, JSON.stringify({ ...temp, own: text }));
-            await redis.set(`state:${userId}`, 'vip_3');
-            return ctx.reply("3. Masukkan No WhatsApp (08xxx):");
+        if (state === 'vip_2' && isOwner(userId)) {
+            const data = JSON.parse(await redis.get(`temp:${userId}`) || '{}');
+            await redis.set(`temp:${userId}`, JSON.stringify({ ...data, own: text }));
+            await redis.set(`state:${userId}`, 'vip_3', { ex: 300 });
+            return ctx.reply("3. Masukkan No WhatsApp:");
         }
-        if (state === 'vip_3') {
-            const temp = JSON.parse(await redis.get(`temp:${userId}`));
-            const tokenVip = crypto.randomBytes(3).toString('hex').toUpperCase();
-            await redis.set(`vip_token:${tokenVip}`, { aiName: temp.ai, ownerName: temp.own, waNumber: text });
-            await redis.del(`state:${userId}`);
-            return ctx.replyWithMarkdown(`✅ *TOKEN VIP:* \`${tokenVip}\`\nBerikan ke user.`);
+        if (state === 'vip_3' && isOwner(userId)) {
+            const data = JSON.parse(await redis.get(`temp:${userId}`) || '{}');
+            const token = crypto.randomBytes(3).toString('hex').toUpperCase();
+            await redis.set(`vip_token:${token}`, { aiName: data.ai, ownerName: data.own, waNumber: text });
+            await redis.del(`state:${userId}`); await redis.del(`temp:${userId}`);
+            return ctx.replyWithMarkdown(`✅ *TOKEN:* \`${token}\``);
         }
 
-        // 3. Handle State Upload Token
+        // 2. Logic EDIT USER (FIXED)
+        if (state?.startsWith('process_edit:') && isOwner(userId)) {
+            const [_, field, targetId] = state.split(':');
+            const userToken = await redis.get(`user_vip:${targetId}`);
+            const userData = await redis.get(`vip_token:${userToken}`);
+            
+            if (field === 'ai') userData.aiName = text;
+            if (field === 'own') userData.ownerName = text;
+            if (field === 'wa') userData.waNumber = text;
+
+            await redis.set(`vip_token:${userToken}`, userData);
+            await redis.del(`state:${userId}`);
+            return ctx.reply(`✅ Berhasil mengupdate ${field} untuk user \`${targetId}\`.`);
+        }
+
+        // 3. Tambah Key
+        if (state === 'awaiting_key' && isOwner(userId)) {
+            await redis.sadd('apikeys:pool', text.trim());
+            await redis.del(`state:${userId}`);
+            return ctx.reply("✅ Key ditambahkan.");
+        }
+
+        // 4. Upload Token
         if (state === 'waiting_token') {
             const data = await redis.get(`vip_token:${text.toUpperCase()}`);
-            if (!data) return ctx.reply("❌ Token tidak ditemukan.");
+            if (!data) return ctx.reply("❌ Token Salah.");
             await redis.set(`user_vip:${userId}`, text.toUpperCase());
             await redis.del(`state:${userId}`);
-            return ctx.reply("✅ VIP Berhasil Diaktifkan!");
+            return ctx.reply("✅ VIP Aktif.");
         }
 
         if (text.startsWith('/')) return;
 
-        // --- 4. CHAT AI PROCESS ---
+        // --- CHAT AI ---
         try {
             await ctx.sendChatAction('typing');
             await redis.incr(`chat_count:${userId}`);
             const response = await aiChat(userId, text);
             await ctx.reply(response);
             
-            // Auto-Script to File
             const codeBlock = /```(\w*)\n([\s\S]*?)```/g;
             let m;
             while ((m = codeBlock.exec(response)) !== null) {
-                await ctx.replyWithDocument({ 
-                    source: Buffer.from(m[2].trim(), 'utf-8'), 
-                    filename: `script_${Date.now()}.txt` 
-                });
+                await ctx.replyWithDocument({ source: Buffer.from(m[2].trim(), 'utf-8'), filename: `script_${Date.now()}.txt` });
             }
-        } catch (e) {
-            ctx.reply(e.message === "API_EMPTY" ? "⚠️ API Key Sistem Kosong. Hubungi Owner." : "❌ Terjadi gangguan server AI.");
-        }
+        } catch (e) { ctx.reply("❌ Gangguan AI."); }
     });
 
     if (req.method === 'POST') await bot.handleUpdate(req.body);
