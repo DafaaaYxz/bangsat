@@ -1,7 +1,9 @@
 
 module.exports = {
     botName: "XdpzQ-AI",
-    // Tambahkan instruksi agar AI selalu menggunakan markdown code blocks
+    // ID Telegram Anda (Owner)
+    ownerId: "7341190291", 
+    
     persona: "Kamu adalah XdpzQ-AI. Jika user meminta kode program, berikan penjelasan singkat lalu tulis kodenya di dalam format ```nama_bahasa ... ```. Kamu cerdas dan membantu.",
 
     owner: {
@@ -11,7 +13,8 @@ module.exports = {
     },
 
     messages: {
-        welcome: "👋 *Halo! Selamat datang di XdpzQ-AI*\n\nSaya asisten AI yang bisa mengirimkan script dalam bentuk FILE. Silakan atur API Key Anda!",
-        info: (status, id) => `📊 *STATUS AKUN*\n\n🆔 ID: \`${id}\` \n🔑 API Key: ${status}`
+        welcome: "👋 *Halo! Selamat datang di XdpzQ-AI*\n\nSaya asisten AI cerdas. Silakan tanya apa saja, saya akan menjawabnya!",
+        welcomeOwner: "👋 *Halo Boss XdpzQ!*\n\nBot berjalan normal. Gunakan tombol di bawah untuk mengelola API Key Global.",
+        info: (status, id) => `📊 *STATUS SISTEM*\n\n🆔 ID Anda: \`${id}\` \n🔌 API Sistem: ${status}`
     }
 };
