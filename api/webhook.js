@@ -1,23 +1,32 @@
 
 const { Telegraf } = require('telegraf');
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-
-bot.start((ctx) => ctx.reply('Bot aktif!'));
-bot.command('ping', (ctx) => ctx.reply('pong'));
-
 module.exports = async (req, res) => {
-  try {
-    // Pastikan hanya menerima request POST
-    if (req.method === 'POST') {
-      await bot.handleUpdate(req.body);
-      res.status(200).send('OK');
-    } else {
-      res.status(200).send('Sepertinya bot sedang berjalan...');
+    // 1. Ambil token di dalam handler untuk memastikan variable terbaca
+    const token = process.env.BOT_TOKEN;
+
+    // 2. Validasi token (Jika ini muncul di log, berarti variabel Vercel memang belum masuk)
+    if (!token) {
+        console.error("ERROR: BOT_TOKEN tidak ditemukan di Environment Variables Vercel!");
+        return res.status(200).send('Token missing'); 
     }
-  } catch (e) {
-    console.error('Error:', e);
-    // Kirim status 200 ke Telegram agar mereka tidak mencoba mengirim ulang pesan yang error
-    res.status(200).send('Error ignored');
-  }
+
+    const bot = new Telegraf(token);
+
+    // Definisi fitur bot
+    bot.start((ctx) => ctx.reply('Bot Berhasil Aktif!'));
+    bot.command('ping', (ctx) => ctx.reply('pong!'));
+    bot.on('text', (ctx) => ctx.reply(`Anda menulis: ${ctx.message.text}`));
+
+    try {
+        if (req.method === 'POST') {
+            await bot.handleUpdate(req.body);
+            return res.status(200).send('OK');
+        } else {
+            return res.status(200).send('Bot is running...');
+        }
+    } catch (err) {
+        console.error('Error saat handle update:', err);
+        return res.status(200).send('Error'); // Tetap kirim 200 agar Telegram tidak spam retry
+    }
 };
